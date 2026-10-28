@@ -1,0 +1,17 @@
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+mercapp.db
+mercapp.db-shm
+mercapp.db-wal
+.env
+dist_package/
+dist/
+build/
+*.zip
+*.rar
+logs/
+MercAPP_IS2_Windows/
+instance/
