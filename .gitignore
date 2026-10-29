@@ -1,0 +1,15 @@
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.env
+mercapp.db
+dist/
+build/
+*.spec
+uploads/products/*
+uploads/categories/*
+uploads/invoices/*
+!uploads/products/.gitkeep
+!uploads/categories/.gitkeep
+!uploads/invoices/.gitkeep
