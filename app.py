@@ -117,11 +117,12 @@ from models import (
     Supplier, PurchaseOrder, PurchaseOrderItem, SupplierInvoice,
     SupplierEmailVerification, SupplierDelivery
 )
+db.init_app(app)
 
 with app.app_context():
     db.create_all()
     
-db.init_app(app)
+
 
 @event.listens_for(Engine, "connect")
 def set_sqlite_pragma(dbapi_connection, connection_record):
