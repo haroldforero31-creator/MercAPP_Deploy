@@ -116,9 +116,10 @@ from models import (
     Order, OrderItem, OrderNotification, AppLicense, EmailQueue,
     Supplier, PurchaseOrder, PurchaseOrderItem, SupplierInvoice,
     SupplierEmailVerification, SupplierDelivery
+)
 with app.app_context():
     db.create_all()
-)
+    
 db.init_app(app)
 
 @event.listens_for(Engine, "connect")
