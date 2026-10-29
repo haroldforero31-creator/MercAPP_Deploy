@@ -3260,7 +3260,7 @@ def products_export():
 @app.route('/products/import', methods=['POST'])
 @login_required
 def products_import():
-    """Importar inventario masivo desde archivo CSV."""
+    """Importar inventario masivo desde archivo CSV con soporte universal de formatos y codificaciones."""
     if 'file' not in request.files:
         flash('No se seleccionó ningún archivo.', 'error')
         return redirect(url_for('products'))
@@ -3270,72 +3270,206 @@ def products_import():
         flash('El archivo está vacío.', 'error')
         return redirect(url_for('products'))
     
-    if not file.filename.lower().endswith('.csv'):
-        flash('Solo se permiten archivos con extensión .CSV', 'error')
+    if not file.filename.lower().endswith(('.csv', '.txt')):
+        flash('Solo se permiten archivos con extensión .CSV o .TXT', 'error')
         return redirect(url_for('products'))
     
     try:
-        content = file.stream.read().decode("utf-8-sig")
+        raw_bytes = file.stream.read()
+        if not raw_bytes:
+            flash('El archivo subido está vacío.', 'error')
+            return redirect(url_for('products'))
+            
+        # Decodificación robusta probando múltiples codificaciones (UTF-8, Excel Windows-1252, Latin-1)
+        content = None
+        for enc in ('utf-8-sig', 'utf-8', 'cp1252', 'latin-1', 'iso-8859-1'):
+            try:
+                content = raw_bytes.decode(enc)
+                break
+            except UnicodeDecodeError:
+                continue
+                
+        if content is None:
+            content = raw_bytes.decode('utf-8', errors='replace')
+            
+        # Determinar delimitador (; o , o \t)
+        first_line = content.split('\n')[0] if content else ''
+        if ';' in first_line:
+            delimiter = ';'
+        elif '\t' in first_line:
+            delimiter = '\t'
+        else:
+            delimiter = ','
+            
         stream = io.StringIO(content)
-        dialect = csv.Sniffer().sniff(content[:2048], delimiters=';,')
-        reader = csv.DictReader(stream, dialect=dialect)
+        reader = csv.reader(stream, delimiter=delimiter)
         
-        required_headers = ['Nombre', 'Precio', 'Categoria']
-        for h in required_headers:
-            if h not in reader.fieldnames:
-                flash(f'Formato inválido. El CSV debe tener la columna "{h}".', 'error')
-                return redirect(url_for('products'))
+        # Leer encabezados
+        try:
+            raw_headers = next(reader)
+        except StopIteration:
+            flash('El archivo CSV no contiene filas.', 'error')
+            return redirect(url_for('products'))
+            
+        # Normalizar encabezados (quitar acentos, espacios y convertir a minúsculas)
+        def clean_h(h):
+            h = (h or '').strip().lower()
+            h = re.sub(r'[áàäâ]', 'a', h)
+            h = re.sub(r'[éèëê]', 'e', h)
+            h = re.sub(r'[íìïî]', 'i', h)
+            h = re.sub(r'[óòöô]', 'o', h)
+            h = re.sub(r'[úùüû]', 'u', h)
+            h = re.sub(r'[^a-z0-9]', '', h)
+            return h
+            
+        header_map = {}
+        for idx, h in enumerate(raw_headers):
+            ch = clean_h(h)
+            if any(k in ch for k in ('nombre', 'producto', 'descripcion', 'item', 'articulo', 'name')):
+                if 'name' not in header_map:
+                    header_map['name'] = idx
+            elif any(k in ch for k in ('precio', 'valor', 'price', 'costo', 'pvp')):
+                if 'price' not in header_map:
+                    header_map['price'] = idx
+            elif any(k in ch for k in ('categoria', 'cat', 'category', 'seccion', 'departamento')):
+                if 'category' not in header_map:
+                    header_map['category'] = idx
+            elif any(k in ch for k in ('codigobarra', 'barcode', 'barra', 'ean', 'upc', 'codigo')):
+                if 'barcode' not in header_map and 'plu' not in ch:
+                    header_map['barcode'] = idx
+            elif any(k in ch for k in ('plu', 'codigoplu')):
+                if 'plu' not in header_map:
+                    header_map['plu'] = idx
+            elif any(k in ch for k in ('stock', 'cantidad', 'existencia', 'inventario', 'cant', 'qty')):
+                if 'stock' not in header_map:
+                    header_map['stock'] = idx
+            elif any(k in ch for k in ('pesable', 'peso', 'granel', 'ventaporpeso')):
+                if 'weight' not in header_map:
+                    header_map['weight'] = idx
+            elif any(k in ch for k in ('unidad', 'medida', 'unidadpeso', 'unit')):
+                if 'unit' not in header_map:
+                    header_map['unit'] = idx
+                
+        if 'name' not in header_map:
+            flash('El archivo debe incluir una columna con el nombre del producto (ej: Nombre, Producto).', 'error')
+            return redirect(url_for('products'))
+            
+        # Obtener o crear categoría por defecto para la tienda
+        default_cat = Category.query.filter_by(store_id=current_user.store_id).order_by(Category.id.asc()).first()
+        if not default_cat:
+            default_cat = Category(store_id=current_user.store_id, name="General", slug="general", display_order=1)
+            db.session.add(default_cat)
+            db.session.flush()
+            
+        categories_cache = {c.name.strip().lower(): c.id for c in Category.query.filter_by(store_id=current_user.store_id).all()}
         
         created_count = 0
         updated_count = 0
         
         for row in reader:
-            name = (row.get('Nombre') or '').strip()
+            if not row or not any(row):
+                continue
+                
+            name_idx = header_map.get('name')
+            name = (row[name_idx] if name_idx is not None and name_idx < len(row) else '').strip()
             if not name:
                 continue
-            
-            barcode = (row.get('CodigoBarras') or '').strip() or None
-            plu_code = (row.get('CodigoPLU') or '').strip() or None
-            price_str = (row.get('Precio') or '').strip()
-            cat_name = (row.get('Categoria') or '').strip()
-            
+                
+            # Precio
+            price = 0
+            price_idx = header_map.get('price')
+            if price_idx is not None and price_idx < len(row):
+                p_str = re.sub(r'[^\d.,]', '', str(row[price_idx])).strip()
+                if p_str:
+                    if '.' in p_str and ',' in p_str:
+                        p_str = p_str.replace('.', '').replace(',', '.')
+                    elif ',' in p_str:
+                        p_str = p_str.replace(',', '.')
+                    elif '.' in p_str:
+                        parts = p_str.split('.')
+                        if len(parts) > 1 and all(len(p) == 3 for p in parts[1:]):
+                            p_str = p_str.replace('.', '')
+                    try:
+                        price = int(round(float(p_str)))
+                    except:
+                        price = 0
+                        
             # Categoría
-            cat_id = None
-            if cat_name:
-                cat = Category.query.filter_by(store_id=current_user.store_id, name=cat_name).first()
-                if not cat:
-                    slug = re.sub(r'[^a-z0-9]', '_', cat_name.lower())
-                    max_order = db.session.query(db.func.max(Category.display_order)).filter_by(store_id=current_user.store_id).scalar() or 0
-                    cat = Category(store_id=current_user.store_id, name=cat_name, slug=slug, display_order=max_order + 1)
-                    db.session.add(cat)
-                    db.session.flush()
-                cat_id = cat.id
-            
-            try:
-                price = int(float(price_str))
-            except:
-                price = 0
+            cat_id = default_cat.id
+            cat_idx = header_map.get('category')
+            if cat_idx is not None and cat_idx < len(row):
+                cat_name = (row[cat_idx] or '').strip()
+                if cat_name:
+                    cn_lower = cat_name.lower()
+                    if cn_lower in categories_cache:
+                        cat_id = categories_cache[cn_lower]
+                    else:
+                        slug = re.sub(r'[^a-z0-9]', '_', cn_lower)[:40] or 'cat'
+                        max_ord = db.session.query(db.func.max(Category.display_order)).filter_by(store_id=current_user.store_id).scalar() or 0
+                        new_cat = Category(store_id=current_user.store_id, name=cat_name[:50], slug=slug, display_order=max_ord + 1)
+                        db.session.add(new_cat)
+                        db.session.flush()
+                        categories_cache[cn_lower] = new_cat.id
+                        cat_id = new_cat.id
+                        
+            # Código de barras / PLU
+            barcode = None
+            barcode_idx = header_map.get('barcode')
+            if barcode_idx is not None and barcode_idx < len(row):
+                b_val = (row[barcode_idx] or '').strip()
+                barcode = b_val if b_val else None
                 
-            stock_str = (row.get('Stock') or '').strip()
-            stock_val = int(float(stock_str)) if stock_str else None
-            sell_by_weight = (row.get('VentaPorPeso') or '').lower() == 'si'
-            weight_unit = (row.get('UnidadPeso') or 'kg').lower()
-            if weight_unit not in ('kg', 'lb'):
-                weight_unit = 'kg'
+            plu_code = None
+            plu_idx = header_map.get('plu')
+            if plu_idx is not None and plu_idx < len(row):
+                plu_val = (row[plu_idx] or '').strip()
+                plu_code = plu_val if plu_val else None
                 
+            # Stock
+            stock_val = None
+            stock_idx = header_map.get('stock')
+            if stock_idx is not None and stock_idx < len(row):
+                s_str = re.sub(r'[^\d]', '', str(row[stock_idx])).strip()
+                if s_str:
+                    try:
+                        stock_val = int(s_str)
+                    except:
+                        stock_val = None
+                        
+            # Venta por peso
+            sell_by_weight = False
+            w_idx = header_map.get('weight')
+            if w_idx is not None and w_idx < len(row):
+                w_str = (row[w_idx] or '').strip().lower()
+                sell_by_weight = w_str in ('si', 's', 'true', '1', 'yes', 'y')
+                
+            unit_val = 'kg'
+            u_idx = header_map.get('unit')
+            if u_idx is not None and u_idx < len(row):
+                u_str = (row[u_idx] or '').strip().lower()
+                if u_str in ('lb', 'libra', 'libras'):
+                    unit_val = 'lb'
+                    
+            # Buscar existente por código de barras o por nombre exacto en esta tienda
             product = None
             if barcode:
                 product = Product.query.filter_by(store_id=current_user.store_id, barcode=barcode).first()
-            
+            if not product:
+                product = Product.query.filter_by(store_id=current_user.store_id, name=name).first()
+                
             if product:
                 product.name = name
                 product.price = price
-                product.plu_code = plu_code
-                if cat_id:
-                    product.category_id = cat_id
-                product.stock = stock_val
+                if barcode:
+                    product.barcode = barcode
+                    product.has_barcode = True
+                if plu_code:
+                    product.plu_code = plu_code
+                product.category_id = cat_id
+                if stock_val is not None:
+                    product.stock = stock_val
                 product.sell_by_weight = sell_by_weight
-                product.weight_unit = weight_unit
+                product.weight_unit = unit_val
                 updated_count += 1
             else:
                 new_p = Product(
@@ -3344,10 +3478,10 @@ def products_import():
                     barcode=barcode,
                     plu_code=plu_code,
                     price=price,
-                    category_id=cat_id or 1,
+                    category_id=cat_id,
                     stock=stock_val,
                     sell_by_weight=sell_by_weight,
-                    weight_unit=weight_unit,
+                    weight_unit=unit_val,
                     has_barcode=True if barcode else False,
                     is_active=True
                 )
@@ -3356,7 +3490,7 @@ def products_import():
                 
         db.session.commit()
         log_audit('PRODUCTS_IMPORT', f'Importación masiva: {created_count} creados, {updated_count} actualizados', current_user.id)
-        flash(f'¡Importación completada! Creados: {created_count}, Actualizados: {updated_count}', 'success')
+        flash(f'¡Importación completada con éxito! Creados: {created_count}, Actualizados: {updated_count}', 'success')
     except Exception as e:
         db.session.rollback()
         flash(f'Error al procesar el archivo CSV: {str(e)}', 'error')
