@@ -119,9 +119,17 @@ from models import (
 )
 db.init_app(app)
 
+# Inicialización automática de tablas y licencia en base de datos para entorno Cloud / Gunicorn
 with app.app_context():
-    db.create_all()
-    
+    try:
+        db.create_all()
+        if not AppLicense.query.first():
+            initial_license = AppLicense(expiration_date=datetime.now() + timedelta(days=365), last_time_checked=datetime.now())
+            db.session.add(initial_license)
+            db.session.commit()
+        print("Tablas de base de datos verificadas/creadas con exito.")
+    except Exception as _e_init:
+        print(f"[INIT DB] Aviso en inicializacion de tablas: {_e_init}")
 
 
 @event.listens_for(Engine, "connect")
@@ -332,9 +340,18 @@ def send_verification_email(email, code):
             </p>
         </div>
         """
-        mail.send(msg)
+        app_obj = app._get_current_object() if hasattr(app, '_get_current_object') else app
+        def _async_send_v(app_inst, message_obj):
+            with app_inst.app_context():
+                try:
+                    mail.send(message_obj)
+                    print(f"[MAIL SUCCESS] Correo de verificacion entregado a {email}")
+                except BaseException as ex:
+                    print(f"[MAIL NOTICE] Envio de verificacion a {email}: {ex}")
+
+        threading.Thread(target=_async_send_v, args=(app_obj, msg), daemon=True).start()
         return True
-    except Exception as e:
+    except BaseException as e:
         print(f"MAIL ERROR: {str(e)}")
         return True
 
@@ -365,9 +382,18 @@ def send_reset_email(user, token):
             <p style="font-size: 0.85rem; color: #9AA0A6;">Este enlace expirará en 1 hora. Si no lo solicitaste, puedes ignorar este mensaje.</p>
         </div>
         """
-        mail.send(msg)
+        app_obj = app._get_current_object() if hasattr(app, '_get_current_object') else app
+        def _async_send_r(app_inst, message_obj):
+            with app_inst.app_context():
+                try:
+                    mail.send(message_obj)
+                    print(f"[MAIL SUCCESS] Correo de recuperacion entregado a {user.email}")
+                except BaseException as ex:
+                    print(f"[MAIL NOTICE] Envio de recuperacion a {user.email}: {ex}")
+
+        threading.Thread(target=_async_send_r, args=(app_obj, msg), daemon=True).start()
         return True
-    except Exception as e:
+    except BaseException as e:
         print(f"MAIL ERROR: {e}")
         return True
 
@@ -469,10 +495,17 @@ def send_credit_sale_invoice(client, sale, sale_items):
             </div>
         </div>
         """
-        mail.send(msg)
+        app_obj = app._get_current_object() if hasattr(app, '_get_current_object') else app
+        def _async_send_cs(app_inst, message_obj):
+            with app_inst.app_context():
+                try:
+                    mail.send(message_obj)
+                except BaseException as ex:
+                    print(f"[MAIL NOTICE] Error enviando factura de fiado a {client.email}: {ex}")
+        threading.Thread(target=_async_send_cs, args=(app_obj, msg), daemon=True).start()
         return True
-    except Exception as e:
-        print(f"[MAIL] Error enviando factura de fiado a {client.email}: {e}")
+    except BaseException as e:
+        print(f"[MAIL] Error preparando factura de fiado a {client.email}: {e}")
         return False
 
 
@@ -558,10 +591,17 @@ def send_credit_payment_receipt(client, payment, previous_debt):
             </div>
         </div>
         """
-        mail.send(msg)
+        app_obj = app._get_current_object() if hasattr(app, '_get_current_object') else app
+        def _async_send_cp(app_inst, message_obj):
+            with app_inst.app_context():
+                try:
+                    mail.send(message_obj)
+                except BaseException as ex:
+                    print(f"[MAIL NOTICE] Error enviando recibo de abono a {client.email}: {ex}")
+        threading.Thread(target=_async_send_cp, args=(app_obj, msg), daemon=True).start()
         return True
-    except Exception as e:
-        print(f"[MAIL] Error enviando recibo de abono a {client.email}: {e}")
+    except BaseException as e:
+        print(f"[MAIL] Error preparando recibo de abono a {client.email}: {e}")
         return False
 
 
