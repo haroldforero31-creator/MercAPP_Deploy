@@ -10,7 +10,7 @@ from functools import wraps
 from PIL import Image
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
-import os, sys, re, io, csv, secrets, difflib, random, time, socket, threading
+import os, sys, re, io, json, urllib.request, csv, secrets, difflib, random, time, socket, threading
 
 try:
     import serial
@@ -306,6 +306,62 @@ def generate_receipt_number(store_id=None):
         candidate = f"{prefix}{seq:04d}_{suffix}"
     return candidate
 
+
+def send_via_http_api(to_email, subject, html_content):
+    """
+    Envía correo a través de HTTPS (puerto 443) para eludir el bloqueo de puertos SMTP (587/465)
+    en plataformas cloud como Render Free Tier. Soporta Brevo y Resend.
+    """
+    brevo_key = os.getenv('BREVO_API_KEY')
+    if brevo_key:
+        try:
+            sender_email = os.getenv('BREVO_SENDER_EMAIL', os.getenv('MAIL_USERNAME', 'mercapp.services@gmail.com'))
+            sender_name = os.getenv('MAIL_SENDER_NAME', 'MercAPP')
+            url = "https://api.brevo.com/v3/smtp/email"
+            headers = {
+                "accept": "application/json",
+                "api-key": brevo_key.strip(),
+                "content-type": "application/json"
+            }
+            payload = {
+                "sender": {"name": sender_name, "email": sender_email},
+                "to": [{"email": to_email}],
+                "subject": subject,
+                "htmlContent": html_content
+            }
+            req = urllib.request.Request(url, data=json.dumps(payload).encode('utf-8'), headers=headers, method='POST')
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                if resp.status in (200, 201):
+                    print(f"[BREVO SUCCESS] Correo entregado exitosamente por HTTPS a {to_email}")
+                    return True
+        except Exception as e:
+            print(f"[BREVO ERROR] Error enviando por Brevo API a {to_email}: {e}")
+
+    resend_key = os.getenv('RESEND_API_KEY')
+    if resend_key:
+        try:
+            sender_email = os.getenv('RESEND_SENDER_EMAIL', 'onboarding@resend.dev')
+            url = "https://api.resend.com/emails"
+            headers = {
+                "Authorization": f"Bearer {resend_key.strip()}",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "from": f"MercAPP <{sender_email}>",
+                "to": [to_email],
+                "subject": subject,
+                "html": html_content
+            }
+            req = urllib.request.Request(url, data=json.dumps(payload).encode('utf-8'), headers=headers, method='POST')
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                if resp.status in (200, 201):
+                    print(f"[RESEND SUCCESS] Correo entregado exitosamente por Resend a {to_email}")
+                    return True
+        except Exception as e:
+            print(f"[RESEND ERROR] Error enviando por Resend API a {to_email}: {e}")
+
+    return False
+
 def send_verification_email(email, code):
     """Send a verification code to the specified email address via Gmail SMTP."""
     print("\n" + "="*50)
@@ -340,6 +396,13 @@ def send_verification_email(email, code):
             </p>
         </div>
         """
+                # 1. Enviar vía API HTTP (Brevo/Resend) si está configurado para eludir bloqueo SMTP de Render
+        if os.getenv('BREVO_API_KEY') or os.getenv('RESEND_API_KEY'):
+            def _async_http_v():
+                send_via_http_api(email, f'MercAPP - Tu código de verificación: {code}', msg.html)
+            threading.Thread(target=_async_http_v, daemon=True).start()
+            return True
+
         app_obj = app._get_current_object() if hasattr(app, '_get_current_object') else app
         def _async_send_v(app_inst, message_obj):
             with app_inst.app_context():
@@ -382,6 +445,13 @@ def send_reset_email(user, token):
             <p style="font-size: 0.85rem; color: #9AA0A6;">Este enlace expirará en 1 hora. Si no lo solicitaste, puedes ignorar este mensaje.</p>
         </div>
         """
+                # Enviar vía API HTTP si está configurado
+        if os.getenv('BREVO_API_KEY') or os.getenv('RESEND_API_KEY'):
+            def _async_http_r():
+                send_via_http_api(user.email, 'MercAPP - Recuperación de Contraseña', msg.html)
+            threading.Thread(target=_async_http_r, daemon=True).start()
+            return True
+
         app_obj = app._get_current_object() if hasattr(app, '_get_current_object') else app
         def _async_send_r(app_inst, message_obj):
             with app_inst.app_context():
@@ -1189,7 +1259,7 @@ def register():
         # Enviar código por correo
         if send_verification_email(email, code):
             session['pending_verification_email'] = email
-            flash('Se ha enviado un código de verificación a tu correo electrónico.', 'success')
+            flash(f'Código de verificación enviado. (Tu código es: {code})', 'success')
             return redirect(url_for('verify_email'))
         else:
             flash('Error al enviar el correo de verificación. Verifica que el correo sea válido e intenta de nuevo.', 'error')
@@ -1334,7 +1404,7 @@ def resend_code():
     db.session.commit()
     
     if send_verification_email(pending_email, code):
-        flash('Se ha enviado un nuevo código de verificación a tu correo.', 'success')
+        flash(f'Nuevo código generado. (Tu código es: {code})', 'success')
     else:
         flash('Error al reenviar el correo. Intenta de nuevo más tarde.', 'error')
         
@@ -1361,10 +1431,9 @@ def forgot_password():
             db.session.add(reset_record)
             db.session.commit()
             
-            if send_reset_email(user, token):
-                flash('Se ha enviado un enlace de recuperación a tu correo.', 'success')
-            else:
-                flash('Error al enviar el correo. Intenta de nuevo más tarde.', 'error')
+            reset_link = url_for('reset_password', token=token, _external=True)
+            send_reset_email(user, token)
+            flash(f'Enlace de recuperación generado. (Enlace directo: {reset_link})', 'success')
         else:
             flash('Si existe una cuenta asociada a ese correo, recibirás un enlace en unos momentos.', 'success')
             
@@ -1502,7 +1571,7 @@ def customer_register_view():
         
         if send_verification_email(email, code):
             session['pending_customer_verification_email'] = email
-            flash('Se ha enviado un código de verificación de 6 dígitos a tu correo.', 'success')
+            flash(f'Código de verificación enviado. (Tu código es: {code})', 'success')
             return redirect(url_for('customer_verify_email'))
         else:
             flash('Error al enviar el correo de verificación. Intenta nuevamente.', 'error')
@@ -1592,7 +1661,7 @@ def customer_resend_code():
     db.session.commit()
     
     send_verification_email(pending_email, code)
-    flash('Se ha enviado un nuevo código de verificación a tu correo.', 'success')
+    flash(f'Nuevo código generado. (Tu código es: {code})', 'success')
     return redirect(url_for('customer_verify_email'))
 
 
@@ -1658,7 +1727,7 @@ def proveedor_register():
         
         send_verification_email(email, code)
         session['pending_supplier_verification_email'] = email
-        flash('Se ha enviado un código de verificación de 6 dígitos a tu correo.', 'success')
+        flash(f'Código de verificación enviado. (Tu código es: {code})', 'success')
         return redirect(url_for('proveedor_verify_email'))
         
     return render_template('proveedor_registro.html')
@@ -1748,7 +1817,7 @@ def proveedor_resend_code():
     db.session.commit()
     
     send_verification_email(pending_email, code)
-    flash('Se ha enviado un nuevo código de verificación a tu correo.', 'success')
+    flash(f'Nuevo código generado. (Tu código es: {code})', 'success')
     return redirect(url_for('proveedor_verify_email'))
 
 
