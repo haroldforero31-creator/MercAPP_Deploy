@@ -117,6 +117,7 @@ from models import (
     Supplier, PurchaseOrder, PurchaseOrderItem, SupplierInvoice,
     SupplierEmailVerification, SupplierDelivery
 )
+
 with app.app_context():
     db.create_all()
     
