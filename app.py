@@ -3260,7 +3260,8 @@ def products_export():
 @app.route('/products/import', methods=['POST'])
 @login_required
 def products_import():
-    """Importar inventario masivo desde archivo CSV con soporte universal de formatos y codificaciones."""
+    """Importar inventario masivo desde archivo CSV optimizado para alta velocidad en la nube."""
+    import traceback
     if 'file' not in request.files:
         flash('No se seleccionó ningún archivo.', 'error')
         return redirect(url_for('products'))
@@ -3269,9 +3270,14 @@ def products_import():
     if not file or file.filename == '':
         flash('El archivo está vacío.', 'error')
         return redirect(url_for('products'))
+        
+    filename_lower = file.filename.lower()
+    if filename_lower.endswith(('.xlsx', '.xls')):
+        flash('Has subido un archivo Excel (.xlsx). Por favor guarda tu archivo como "CSV (delimitado por comas o punto y coma)" e inténtalo de nuevo.', 'error')
+        return redirect(url_for('products'))
     
-    if not file.filename.lower().endswith(('.csv', '.txt')):
-        flash('Solo se permiten archivos con extensión .CSV o .TXT', 'error')
+    if not filename_lower.endswith(('.csv', '.txt')):
+        flash('Formato no compatible. Sube un archivo con extensión .CSV o .TXT.', 'error')
         return redirect(url_for('products'))
     
     try:
@@ -3280,7 +3286,7 @@ def products_import():
             flash('El archivo subido está vacío.', 'error')
             return redirect(url_for('products'))
             
-        # Decodificación robusta probando múltiples codificaciones (UTF-8, Excel Windows-1252, Latin-1)
+        # Decodificación probando UTF-8 con/sin BOM, Windows-1252 (Excel español), Latin-1
         content = None
         for enc in ('utf-8-sig', 'utf-8', 'cp1252', 'latin-1', 'iso-8859-1'):
             try:
@@ -3308,10 +3314,9 @@ def products_import():
         try:
             raw_headers = next(reader)
         except StopIteration:
-            flash('El archivo CSV no contiene filas.', 'error')
+            flash('El archivo CSV no contiene datos.', 'error')
             return redirect(url_for('products'))
             
-        # Normalizar encabezados (quitar acentos, espacios y convertir a minúsculas)
         def clean_h(h):
             h = (h or '').strip().lower()
             h = re.sub(r'[áàäâ]', 'a', h)
@@ -3351,17 +3356,29 @@ def products_import():
                     header_map['unit'] = idx
                 
         if 'name' not in header_map:
-            flash('El archivo debe incluir una columna con el nombre del producto (ej: Nombre, Producto).', 'error')
+            flash('El archivo debe incluir una columna con el nombre del producto (ej: Nombre, Producto, Descripción).', 'error')
             return redirect(url_for('products'))
             
-        # Obtener o crear categoría por defecto para la tienda
-        default_cat = Category.query.filter_by(store_id=current_user.store_id).order_by(Category.id.asc()).first()
+        # =========================================================================
+        # CARGA PREVIA EN MEMORIA (BATCH) - Reduce roundtrips a la nube de 1000 a 2
+        # =========================================================================
+        store_id = current_user.store_id
+        
+        # 1. Categorías existentes
+        existing_cats = Category.query.filter_by(store_id=store_id).all()
+        categories_cache = {c.name.strip().lower(): c for c in existing_cats}
+        default_cat = existing_cats[0] if existing_cats else None
         if not default_cat:
-            default_cat = Category(store_id=current_user.store_id, name="General", slug="general", display_order=1)
+            default_cat = Category(store_id=store_id, name="General", slug="general", display_order=1)
             db.session.add(default_cat)
-            db.session.flush()
+            categories_cache["general"] = default_cat
             
-        categories_cache = {c.name.strip().lower(): c.id for c in Category.query.filter_by(store_id=current_user.store_id).all()}
+        max_cat_order = max([c.display_order or 0 for c in existing_cats], default=1)
+        
+        # 2. Productos existentes de la tienda (en memoria para búsqueda O(1) instantánea)
+        existing_products = Product.query.filter_by(store_id=store_id).all()
+        products_by_barcode = {p.barcode.strip(): p for p in existing_products if p.barcode and p.barcode.strip()}
+        products_by_name = {p.name.strip().lower(): p for p in existing_products if p.name and p.name.strip()}
         
         created_count = 0
         updated_count = 0
@@ -3375,6 +3392,8 @@ def products_import():
             if not name:
                 continue
                 
+            name_lower = name.lower()
+            
             # Precio
             price = 0
             price_idx = header_map.get('price')
@@ -3395,22 +3414,21 @@ def products_import():
                         price = 0
                         
             # Categoría
-            cat_id = default_cat.id
+            target_cat = default_cat
             cat_idx = header_map.get('category')
             if cat_idx is not None and cat_idx < len(row):
                 cat_name = (row[cat_idx] or '').strip()
                 if cat_name:
                     cn_lower = cat_name.lower()
                     if cn_lower in categories_cache:
-                        cat_id = categories_cache[cn_lower]
+                        target_cat = categories_cache[cn_lower]
                     else:
                         slug = re.sub(r'[^a-z0-9]', '_', cn_lower)[:40] or 'cat'
-                        max_ord = db.session.query(db.func.max(Category.display_order)).filter_by(store_id=current_user.store_id).scalar() or 0
-                        new_cat = Category(store_id=current_user.store_id, name=cat_name[:50], slug=slug, display_order=max_ord + 1)
+                        max_cat_order += 1
+                        new_cat = Category(store_id=store_id, name=cat_name[:50], slug=slug, display_order=max_cat_order)
                         db.session.add(new_cat)
-                        db.session.flush()
-                        categories_cache[cn_lower] = new_cat.id
-                        cat_id = new_cat.id
+                        categories_cache[cn_lower] = new_cat
+                        target_cat = new_cat
                         
             # Código de barras / PLU
             barcode = None
@@ -3450,12 +3468,12 @@ def products_import():
                 if u_str in ('lb', 'libra', 'libras'):
                     unit_val = 'lb'
                     
-            # Buscar existente por código de barras o por nombre exacto en esta tienda
+            # Búsqueda en memoria instantánea (sin roundtrips SQL)
             product = None
-            if barcode:
-                product = Product.query.filter_by(store_id=current_user.store_id, barcode=barcode).first()
-            if not product:
-                product = Product.query.filter_by(store_id=current_user.store_id, name=name).first()
+            if barcode and barcode in products_by_barcode:
+                product = products_by_barcode[barcode]
+            elif name_lower in products_by_name:
+                product = products_by_name[name_lower]
                 
             if product:
                 product.name = name
@@ -3463,9 +3481,13 @@ def products_import():
                 if barcode:
                     product.barcode = barcode
                     product.has_barcode = True
+                    products_by_barcode[barcode] = product
                 if plu_code:
                     product.plu_code = plu_code
-                product.category_id = cat_id
+                if target_cat.id:
+                    product.category_id = target_cat.id
+                else:
+                    product.category = target_cat
                 if stock_val is not None:
                     product.stock = stock_val
                 product.sell_by_weight = sell_by_weight
@@ -3473,26 +3495,36 @@ def products_import():
                 updated_count += 1
             else:
                 new_p = Product(
-                    store_id=current_user.store_id,
+                    store_id=store_id,
                     name=name,
                     barcode=barcode,
                     plu_code=plu_code,
                     price=price,
-                    category_id=cat_id,
                     stock=stock_val,
                     sell_by_weight=sell_by_weight,
                     weight_unit=unit_val,
                     has_barcode=True if barcode else False,
                     is_active=True
                 )
+                if target_cat.id:
+                    new_p.category_id = target_cat.id
+                else:
+                    new_p.category = target_cat
+                    
                 db.session.add(new_p)
+                if barcode:
+                    products_by_barcode[barcode] = new_p
+                products_by_name[name_lower] = new_p
                 created_count += 1
                 
+        # Un único commit al final para guardar todos los registros
         db.session.commit()
         log_audit('PRODUCTS_IMPORT', f'Importación masiva: {created_count} creados, {updated_count} actualizados', current_user.id)
-        flash(f'¡Importación completada con éxito! Creados: {created_count}, Actualizados: {updated_count}', 'success')
+        flash(f'¡Inventario importado exitosamente! Productos creados: {created_count}, actualizados: {updated_count}', 'success')
     except Exception as e:
         db.session.rollback()
+        print("[IMPORT ERROR] Traceback:")
+        print(traceback.format_exc())
         flash(f'Error al procesar el archivo CSV: {str(e)}', 'error')
         
     return redirect(url_for('products'))
