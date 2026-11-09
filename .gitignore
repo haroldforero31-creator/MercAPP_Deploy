@@ -13,3 +13,9 @@ uploads/invoices/*
 !uploads/products/.gitkeep
 !uploads/categories/.gitkeep
 !uploads/invoices/.gitkeep
+.coverage
+htmlcov/
+test_smoke.db
+test_stress.db
+.secret_key
+instance/

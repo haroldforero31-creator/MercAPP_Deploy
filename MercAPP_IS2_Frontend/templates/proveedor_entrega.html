@@ -53,6 +53,8 @@
     {% endwith %}
 
     <form method="POST" enctype="multipart/form-data" id="deliveryForm">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+
       
       <!-- Row 1: Order Number & Date -->
       <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-bottom: 18px;">

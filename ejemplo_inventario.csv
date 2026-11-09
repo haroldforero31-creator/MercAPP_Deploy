@@ -1,0 +1,22 @@
+Nombre;CodigoBarras;CodigoPLU;Precio;Categoria;VentaPorPeso;UnidadPeso;Stock
+Arroz Diana 1000g;7702001001;;4800;Despensa;no;kg;80
+Aceite Premier 900ml;7702001002;;9500;Despensa;no;kg;40
+Frijol Bola Roja 500g;7702001003;;5200;Despensa;no;kg;60
+Azúcar Manuelita 1000g;7702001004;;4200;Despensa;no;kg;100
+Café Sello Rojo 500g;7702001005;;14500;Despensa;no;kg;35
+Leche Alquería Entera 1L;7702002001;;4600;Lácteos;no;kg;90
+Queso Campesino Colanta 500g;7702002002;;11500;Lácteos;no;kg;25
+Yogurt Alpina Fresa 1000ml;7702002003;;8900;Lácteos;no;kg;30
+Mantequilla Colanta 250g;7702002004;;6500;Lácteos;no;kg;40
+Coca-Cola Original 1.5L;7702003001;;5500;Bebidas;no;kg;70
+Jugo Hit Mora 500ml;7702003002;;2800;Bebidas;no;kg;50
+Agua Cristal Sin Gas 600ml;7702003003;;2000;Bebidas;no;kg;120
+Papas Margarita Pollo 105g;7702004001;;4200;Snacks;no;kg;45
+Galletas Festival Chocolate 408g;7702004002;;7800;Snacks;no;kg;35
+Plátano Maduro;7702005001;4011;3200;Frescos;si;kg;150
+Manzana Roja Importada;7702005002;4012;7500;Frescos;si;kg;60
+Tomate Chonto;7702005003;4013;3800;Frescos;si;kg;80
+Pechuga de Pollo;7702005004;4014;16500;Frescos;si;kg;40
+Detergente Fab 1000g;7702006001;;9800;Limpieza y Aseo;no;kg;50
+Jabón Rey Barra 300g;7702006002;;2500;Limpieza y Aseo;no;kg;100
+
