@@ -4678,10 +4678,13 @@ def admin_backup_database():
 
 @app.route('/api/diag-mail')
 def diag_mail():
-    import socket, smtplib
+    import socket
     results = {}
+    results['is_render'] = bool(os.getenv('RENDER'))
     results['env_mail_user'] = os.getenv('MAIL_USERNAME', 'NOT_SET')
     results['has_env_mail_pass'] = bool(os.getenv('MAIL_PASSWORD'))
+    results['has_brevo_key'] = bool(os.getenv('BREVO_API_KEY'))
+    results['has_resend_key'] = bool(os.getenv('RESEND_API_KEY'))
     
     # 1. Check DNS
     try:
@@ -4692,27 +4695,19 @@ def diag_mail():
         
     # 2. Check Port 465
     try:
-        s465 = socket.create_connection(('smtp.gmail.com', 465), timeout=4)
+        s465 = socket.create_connection(('smtp.gmail.com', 465), timeout=2)
         s465.close()
         results['port_465_open'] = True
     except Exception as e:
-        results['port_465_open'] = f"FAIL: {e}"
+        results['port_465_open'] = f"BLOCKED: {e}"
 
     # 3. Check Port 587
     try:
-        s587 = socket.create_connection(('smtp.gmail.com', 587), timeout=4)
+        s587 = socket.create_connection(('smtp.gmail.com', 587), timeout=2)
         s587.close()
         results['port_587_open'] = True
     except Exception as e:
-        results['port_587_open'] = f"FAIL: {e}"
-
-    # 4. Try sending test email
-    target = request.args.get('to', 'haroldgambaforero@gmail.com')
-    try:
-        res = send_email_unified(target, 'Test Diagnostic Render', '<p>Test Render</p>')
-        results['send_result'] = res
-    except Exception as e:
-        results['send_result'] = f"EXCEPTION: {e}"
+        results['port_587_open'] = f"BLOCKED: {e}"
 
     return jsonify(results)
 
